@@ -45,7 +45,7 @@ def load_config(mode="full"):
     ]
     
     if mode == "test":
-        recipients = ["kevin@quebon.com", "jason@quebon.com"]
+        recipients = ["jason@quebon.com"]
     else:
         recipients = all_recipients
 
