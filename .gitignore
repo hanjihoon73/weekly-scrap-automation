@@ -1,0 +1,15 @@
+# Temporary files
+.tmp/
+*.log
+
+# Sensitive information
+.env
+credentials.json
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
