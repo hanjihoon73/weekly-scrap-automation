@@ -8,7 +8,7 @@ sys.path.append(current_dir)
 from scrape_naver_email import main, load_config, scrape_naver_blog, send_email
 
 def run_test_mode():
-    """ Runs the scraper in test mode (sends to kevin@quebon.com and jason@quebon.com) """
+    """ Runs the scraper in test mode (sends to jason@quebon.com) """
     print("Starting Weekly Blog Scrap [TEST MODE - Jason]")
     
     # Load config in test mode (filters recipients)
@@ -20,7 +20,7 @@ def run_test_mode():
     if results:
         # Send email to test recipients
         send_email(results, config)
-        print("Test email sent successfullly to kevin@quebon.com and jason@quebon.com")
+        print("Test email sent successfullly to jason@quebon.com")
     else:
         print("No results found to send.")
 

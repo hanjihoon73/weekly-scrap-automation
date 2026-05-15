@@ -35,13 +35,7 @@ def load_config(mode="full"):
     load_dotenv(local_env_path)
     
     all_recipients = [
-        "kee@quebon.com", 
-        "jason@quebon.com",
-        "carly@quebon.com",
-        "co@quebon.com",
-        "sophie@quebon.com",
-        "june@quebon.com",
-        "steve@quebon.com"
+        "review@quebon.com"
     ]
     
     if mode == "test":
