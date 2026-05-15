@@ -9,7 +9,7 @@ from scrape_naver_email import main, load_config, scrape_naver_blog, send_email
 
 def run_test_mode():
     """ Runs the scraper in test mode (sends to kevin@quebon.com and jason@quebon.com) """
-    print("Starting Weekly Blog Scrap [TEST MODE - Kevin & Jason]")
+    print("Starting Weekly Blog Scrap [TEST MODE - Jason]")
     
     # Load config in test mode (filters recipients)
     config = load_config(mode="test")
