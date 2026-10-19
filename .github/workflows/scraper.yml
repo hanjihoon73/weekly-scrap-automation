@@ -15,6 +15,9 @@ on:
           - test
           - full
 
+permissions:
+  contents: write
+
 jobs:
   scrape-and-send:
     runs-on: ubuntu-latest
@@ -58,3 +61,6 @@ jobs:
           else
             python execution/scrape_naver_email.py --mode full
           fi
+
+      - name: Keepalive Workflow
+        uses: gautamkrishnar/keepalive-workflow@v1
