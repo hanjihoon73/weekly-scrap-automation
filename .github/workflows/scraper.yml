@@ -62,5 +62,21 @@ jobs:
             python execution/scrape_naver_email.py --mode full
           fi
 
-      - name: Keepalive Workflow
-        uses: gautamkrishnar/keepalive-workflow@v1
+      - name: Keepalive Workflow (Native Git)
+        run: |
+          LAST_COMMIT_DATE=$(git log -1 --format=%ct)
+          CURRENT_DATE=$(date +%s)
+          DAYS_DIFF=$(( (CURRENT_DATE - LAST_COMMIT_DATE) / 86400 ))
+          echo "Days since last commit: $DAYS_DIFF days"
+          
+          if [ $DAYS_DIFF -ge 45 ]; then
+            echo "Updating keepalive timestamp to prevent 60-day scheduled workflow disable..."
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            date -u > .github/keepalive.txt
+            git add .github/keepalive.txt
+            git commit -m "chore: keepalive scheduled workflow [skip ci]"
+            git push
+          else
+            echo "Repository is active (last commit was $DAYS_DIFF days ago). No keepalive commit needed."
+          fi
