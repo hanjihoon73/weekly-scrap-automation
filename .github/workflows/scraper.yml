@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   scrape-and-send:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     
     steps:
       - name: Checkout Code
@@ -35,7 +35,7 @@ jobs:
       - name: Install Korean Fonts for Selenium Screenshots
         run: |
           sudo apt-get update
-          sudo apt-get install -y fonts-nanum fonts-nanum-coding fonts-nanum-extra
+          sudo apt-get install -y fonts-nanum fonts-nanum-extra
           fc-cache -fv
 
       - name: Install Dependencies
