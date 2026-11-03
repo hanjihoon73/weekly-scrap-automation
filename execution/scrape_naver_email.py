@@ -113,9 +113,20 @@ def parse_date_text(date_text):
             
     return False, None
 
-def scrape_naver_blog(scrape_only=False):
-    """Scrape Naver for blog results for '깨봉수학' using refined card-based extraction."""
+def scrape_naver_blog(scrape_only=False, title_pattern=None, query_text="깨봉수학"):
+    """Scrape Naver for blog results for '깨봉수학' using refined card-based extraction.
+
+    title_pattern: 제목 필터 정규식 (None이면 기존 동작대로 '깨봉수학' 포함 여부로 판단)
+                   - 메일 발송(scrape_naver_email)은 기본값 사용 → 기존 동작 그대로 유지
+                   - 노션 동기화(sync_reviews_to_notion)는 '깨봉|QUEBON' 등 넓은 패턴 사용
+    """
     results = []
+    # 제목 필터 함수: 패턴 미지정 시 기존 조건('깨봉수학' 포함)과 동일
+    if title_pattern:
+        _title_re = re.compile(title_pattern, re.IGNORECASE)
+        title_ok = lambda t: bool(_title_re.search(t))
+    else:
+        title_ok = lambda t: "깨봉수학" in t
     
     chrome_options = Options()
     chrome_options.add_experimental_option("detach", True)
@@ -140,7 +151,7 @@ def scrape_naver_blog(scrape_only=False):
     skipped_count = 0
     
     try:
-        query = quote("깨봉수학")
+        query = quote(query_text)  # 검색어 (기본값: 깨봉수학)
         # User preferred URL: ssc=tab.blog.all (Explicit Blog Tab)
         search_url = f"https://search.naver.com/search.naver?ssc=tab.blog.all&query={query}&sm=tab_opt&nso=so%3Ar%2Cp%3A1w"
         
@@ -281,8 +292,8 @@ def scrape_naver_blog(scrape_only=False):
                     reason = "Duplicate URL"
                 else:
                     # 4) Check if title contains '깨봉수학'
-                    if "깨봉수학" not in current_title:
-                        reason = "Title does not contain '깨봉수학'"
+                    if not title_ok(current_title):
+                        reason = "Title does not match title filter"
                     else:
                         # 5) Domain filtering: Only include recognized blog platforms
                         parsed_url = urlparse(current_url)
