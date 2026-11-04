@@ -1,0 +1,83 @@
+name: Weekly Review Notion Sync
+
+on:
+  schedule:
+    # 매주 금요일 KST 12:50 실행 (UTC 03:50) — 메일 발송 워크플로우(12:20) 이후로 분리
+    - cron: '50 3 * * 5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '테스트 실행 (노션에 쓰지 않고 결과만 출력)'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      skip_recheck:
+        description: '기존 후기 공개 상태 재점검 생략'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      urls:
+        description: '(선택) 검색 대신 처리할 블로그 URL, 쉼표로 구분'
+        required: false
+        default: ''
+
+# 동기화 작업이 중복 실행되지 않도록 동시 실행 그룹 지정 (메일 워크플로우와는 시간대로 분리)
+concurrency:
+  group: review-notion-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Korean Fonts for Selenium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-nanum
+          fc-cache -fv
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Notion Sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TZ: Asia/Seoul
+          # 수동 입력값은 env로 전달 (셸 명령에 직접 삽입하지 않음)
+          IN_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          IN_SKIP_RECHECK: ${{ github.event.inputs.skip_recheck || 'false' }}
+          IN_URLS: ${{ github.event.inputs.urls }}
+        run: |
+          # 예약 실행은 실제 반영, 수동 실행은 입력값에 따름
+          ARGS=""
+          if [ "$IN_DRY_RUN" == "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "$IN_SKIP_RECHECK" == "true" ]; then ARGS="$ARGS --skip-recheck"; fi
+          if [ -n "$IN_URLS" ]; then
+            python execution/sync_reviews_to_notion.py $ARGS --urls "$IN_URLS"
+          else
+            python execution/sync_reviews_to_notion.py $ARGS
+          fi
