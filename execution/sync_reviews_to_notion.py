@@ -249,6 +249,24 @@ TAG_PROMPT = """당신은 깨봉수학(초등 수학 온라인 학습 서비스)
 """
 
 
+def extract_json(text):
+    """응답 텍스트에서 JSON 객체를 찾아 dict로 반환 (코드펜스·앞뒤 설명문 허용). 없으면 None"""
+    if not text:
+        return None
+    # ```json ... ``` 코드펜스 제거
+    text = re.sub(r"```(?:json)?", "", text)
+    # 첫 '{'부터 짝이 맞는 '}'까지 순차 시도 (설명문 안의 중괄호에 대비)
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, _ = decoder.raw_decode(text[m.start():])
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            continue
+    return None
+
+
 def tag_review(title, body):
     """Claude API로 키워드·학년 태깅. 키가 없거나 실패하면 빈 결과 반환"""
     empty = {"keywords": [], "grades": [], "note": ""}
@@ -262,11 +280,21 @@ def tag_review(title, body):
         try:
             msg = client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=500,
+                max_tokens=1500,  # 응답이 잘리지 않도록 여유 확보
+                system="You are a classifier. Reply with a single JSON object only, no prose.",
                 messages=[{"role": "user", "content": prompt}],
             )
-            text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-            data = json.loads(re.search(r"\{.*\}", text, re.S).group(0))  # JSON 부분만 파싱
+            # 텍스트 블록만 모음 (thinking 등 다른 블록은 무시)
+            text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
+            data = extract_json(text)
+            if data is None:
+                # 원인 파악용: 종료 사유·블록 종류·응답 앞부분을 로그에 남김
+                kinds = [getattr(b, "type", "?") for b in msg.content]
+                raise ValueError(
+                    f"JSON 없음 (model={getattr(msg, 'model', CLAUDE_MODEL)}, "
+                    f"stop_reason={getattr(msg, 'stop_reason', '?')}, blocks={kinds}, "
+                    f"응답앞부분={text[:200]!r})"
+                )
             return {
                 "keywords": order_keywords(data.get("keywords")),
                 "grades": order_grades(data.get("grades")),
