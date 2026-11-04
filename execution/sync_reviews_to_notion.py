@@ -267,15 +267,27 @@ def extract_json(text):
     return None
 
 
+def short_error(e):
+    """예외를 비고에 넣기 좋은 짧은 사유로 변환 (예: 'AuthenticationError 401', 'JSON 없음')"""
+    if e is None:
+        return "알 수 없음"
+    status = getattr(e, "status_code", None)
+    if status:
+        return f"{type(e).__name__} {status}"
+    msg = str(e).split("(")[0].strip()  # 'JSON 없음 (model=...)' → 'JSON 없음'
+    return (msg or type(e).__name__)[:60]
+
+
 def tag_review(title, body):
-    """Claude API로 키워드·학년 태깅. 키가 없거나 실패하면 빈 결과 반환"""
-    empty = {"keywords": [], "grades": [], "note": ""}
+    """Claude API로 키워드·학년 태깅. 키가 없거나 실패하면 빈 결과 + error(실패 사유) 반환"""
+    empty = {"keywords": [], "grades": [], "note": "", "error": ""}
     if not ANTHROPIC_API_KEY or not body:
         return empty
     import anthropic  # 태깅을 쓸 때만 임포트
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = TAG_PROMPT.replace("{title}", title).replace("{body}", body[:BODY_LIMIT])
+    last_error = None
     for attempt in range(2):  # 1회 재시도
         try:
             msg = client.messages.create(
@@ -299,11 +311,14 @@ def tag_review(title, body):
                 "keywords": order_keywords(data.get("keywords")),
                 "grades": order_grades(data.get("grades")),
                 "note": clean(data.get("note", "")),
+                "error": "",
             }
         except Exception as e:
             print(f"  [WARN] 태깅 실패({attempt + 1}/2): {e}")
+            last_error = e
             time.sleep(2)
-    return empty
+    # 두 번 모두 실패: 사유를 짧게 요약해 반환 (비고·요약에 표시)
+    return {**empty, "error": short_error(last_error)}
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +428,8 @@ def collect_new(urls, known_links, dry_run=False):
         item = {"url": url, **post, **tags, "connector": is_connector(post["body"])}
         if not ANTHROPIC_API_KEY:
             item["note"] = "자동 태깅 미실행(API 키 없음)"
+        elif item.get("error"):
+            item["note"] = f"자동 태깅 실패({item['error']}) - 키워드·학년 수동 입력 필요"
         items.append(item)
         known_links.add(url)
         print(f"[NEW] {cut_title(post['title'])} | {post['date']} | {post['nickname']} | "
@@ -467,10 +484,16 @@ def recheck_status(notion, dry_run=False):
 def write_summary(new_items, changed, dry_run):
     """GitHub Actions 실행 요약 작성"""
     lines = [f"## QB 후기 노션 동기화 {'(DRY RUN)' if dry_run else ''}",
-             f"- 신규 등록: {len(new_items)}건", f"- 비공개 전환: {len(changed)}건", ""]
+             f"- 신규 등록: {len(new_items)}건", f"- 비공개 전환: {len(changed)}건"]
+    failed = [it for it in new_items if it.get("error")]
+    if failed:
+        # 태깅 실패가 있으면 눈에 띄게 경고 (노션 비고에도 사유 기록됨)
+        lines.append(f"- ⚠️ 자동 태깅 실패: {len(failed)}건 (노션 비고 확인 후 수동 입력 필요)")
+    lines.append("")
     for it in new_items:
+        tag_text = f"⚠️ 태깅 실패({it['error']})" if it.get("error") else (', '.join(it['keywords']) or '키워드 없음')
         lines.append(f"- [{cut_title(it['title'])}]({it['url']}) · 커넥터즈 {'Yes' if it['connector'] else 'No'}"
-                     f" · {', '.join(it['keywords']) or '키워드 없음'}")
+                     f" · {tag_text}")
     for url in changed:
         lines.append(f"- 비공개 전환: {url}")
     text = "\n".join(lines)
