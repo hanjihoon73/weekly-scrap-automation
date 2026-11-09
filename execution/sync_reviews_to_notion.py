@@ -12,18 +12,22 @@ QB 후기 노션 동기화 스크립트 (블로그 전용)
   5) 자동 태깅   : Claude API로 키워드·자녀 학년 추출 → 분류는 키워드에서 자동 계산
   6) 노션 등록   : 신규 행 생성
   7) 상태 재점검 : 공개 상태인 기존 블로그 행을 다시 열어 비공개·삭제 전환 여부 갱신
+  8) 품질 채점   : 신규 글은 등록 시 채점, 기존 글은 --rescore 옵션으로 재채점 (score_reviews.py)
 
 실행 예
   python execution/sync_reviews_to_notion.py              # 실제 반영
   python execution/sync_reviews_to_notion.py --dry-run    # 노션에 쓰지 않고 결과만 출력
   python execution/sync_reviews_to_notion.py --skip-recheck
   python execution/sync_reviews_to_notion.py --urls "https://blog.naver.com/id/123,..."  # 검색 없이 지정 URL만 처리
+  python execution/sync_reviews_to_notion.py --rescore missing   # 점수 없는 공개 블로그만 채점
+  python execution/sync_reviews_to_notion.py --rescore all       # 공개 블로그 전체 재채점 ('검토 완료' 행 제외)
 
 필요 환경변수 (GitHub Secrets)
   NOTION_TOKEN        : 노션 내부 통합 토큰
   NOTION_DATABASE_ID  : QUEBON_Reviews 데이터베이스 ID
   ANTHROPIC_API_KEY   : Claude API 키 (없으면 태깅을 건너뛰고 해당 칸을 비워 둠)
   CLAUDE_MODEL        : (선택) 태깅 모델, 기본값 claude-haiku-5-5
+  SCORE_MODEL         : (선택) 채점 모델, 기본값 claude-sonnet-5-5
 """
 
 import os
@@ -41,6 +45,7 @@ from dotenv import load_dotenv
 
 # 같은 폴더의 기존 스크래퍼 함수 재사용
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import score_reviews as sr  # 품질 채점 모듈
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -190,6 +195,7 @@ def fetch_post(url, session=None):
     # 본문: 스마트에디터 단락 단위로 줄바꿈 유지
     main = soup.select_one(".se-main-container, #viewTypeSelector, .post_ct")
     body = ""
+    images = len(main.select("img")) if main else len(soup.select("article img, .entry-content img"))
     if main:
         for el in main.select(".se-documentTitle, script, style"):
             el.decompose()
@@ -203,6 +209,7 @@ def fetch_post(url, session=None):
         "date": parse_post_date(date_text),
         "nickname": nickname,
         "body": body,
+        "images": images,       # 본문 이미지 수 (채점 참고용)
         "ok": bool(body),
     }
 
@@ -406,6 +413,8 @@ def build_properties(item):
     }
     if item.get("date"):
         props["작성일"] = {"date": {"start": item["date"]}}
+    if (item.get("score") or {}).get("scores"):
+        props.update(sr.score_properties(item["score"], rt))
     return props
 
 
@@ -438,12 +447,54 @@ def collect_new(urls, known_links, dry_run=False):
             item["note"] = "자동 태깅 미실행(API 키 없음)"
         elif item.get("error"):
             item["note"] = f"자동 태깅 실패({item['error']}) - 키워드·학년 수동 입력 필요"
+        if ANTHROPIC_API_KEY:
+            item["score"] = sr.score_review(post["title"], post["body"], post.get("images", 0), ANTHROPIC_API_KEY)
         items.append(item)
         known_links[url] = {"title": post["title"], "id": None, "this_run": True}  # 같은 실행 내 중복 방지
         print(f"[NEW] {cut_title(post['title'])} | {post['date']} | {post['nickname']} | "
               f"커넥터즈:{'Yes' if item['connector'] else 'No'} | 키워드:{item['keywords']} | 학년:{item['grades']}")
         time.sleep(REQUEST_DELAY)
     return items, skipped
+
+
+def rescore_existing(notion, mode="missing", dry_run=False):
+    """
+    공개 블로그 행 채점.
+    mode='missing': 점수가 없는 행만 / mode='all': 전체 재채점. '검토 완료' 행은 항상 제외.
+    반환: [{title, url, id, result}] (result.error가 있으면 실패)
+    """
+    rows = notion.query({"and": [
+        {"property": "종류", "select": {"equals": "블로그"}},
+        {"property": "상태", "select": {"equals": "공개"}},
+        {"property": "검토 완료", "checkbox": {"equals": False}},
+    ]})
+    session, out = requests.Session(), []
+    for p in rows:
+        props = p["properties"]
+        url = props["링크"].get("url")
+        if not url:
+            continue
+        if mode == "missing" and props.get("경험 구체성", {}).get("number") is not None:
+            continue
+        title = "".join(t.get("plain_text", "") for t in props["제목"]["title"])
+        uid = (props.get("id", {}).get("unique_id") or {}).get("number")
+        try:
+            post = fetch_post(url, session)
+        except Exception as e:
+            print(f"[WARN] 재채점 수집 실패: {url} ({e})")
+            out.append({"title": title, "url": url, "id": uid, "result": {"scores": None, "error": "본문 수집 실패"}})
+            continue
+        if not post["ok"]:
+            print(f"[SKIP] 재채점 본문 없음(비공개 가능성): {url}")
+            continue
+        result = sr.score_review(post["title"] or title, post["body"], post.get("images", 0), ANTHROPIC_API_KEY)
+        out.append({"title": title, "url": url, "id": uid, "result": result})
+        if result.get("scores"):
+            print(f"[SCORE] id {uid} | {cut_title(title)} | {result['scores']} | 평균 {sr.average(result['scores'])}")
+            if not dry_run:
+                notion.update(p["id"], sr.score_properties(result, rt))
+        time.sleep(REQUEST_DELAY)
+    return out
 
 
 def recheck_status(notion, dry_run=False):
@@ -489,7 +540,29 @@ def recheck_status(notion, dry_run=False):
     return [url for _, url in changed]
 
 
-def write_summary(new_items, changed, dry_run, total=None, skipped=None):
+def score_summary_lines(scored):
+    """채점 결과 요약 (scored: [{title, url, id, result}])"""
+    ok = [x for x in scored if x["result"].get("scores")]
+    failed = [x for x in scored if not x["result"].get("scores")]
+    if not scored:
+        return []
+    lines = ["", "### 품질 채점",
+             f"- 채점 완료: {len(ok)}건 · 우수(평균 75↑): {sum(sr.is_excellent(x['result']['scores']) for x in ok)}건"
+             f" · 2차 활용 후보: {sum(sr.is_reuse_candidate(x['result']) for x in ok)}건"]
+    if failed:
+        lines.append(f"- ⚠️ 채점 실패: {len(failed)}건")
+    for x in sorted(ok, key=lambda x: -sr.average(x["result"]["scores"])):
+        sc, avg = x["result"]["scores"], sr.average(x["result"]["scores"])
+        marks = (" · 🏅우수" if sr.is_excellent(sc) else "") + (" · ♻️2차 후보" if sr.is_reuse_candidate(x["result"]) else "")
+        flags = f" · 검토 필요: {', '.join(x['result']['flags'])}" if x["result"].get("flags") else ""
+        id_text = f"id {x['id']} · " if x.get("id") is not None else ""
+        lines.append(f"- {id_text}[{cut_title(x['title'])}]({x['url']}) · 평균 {avg} {sr.stars(avg)}{marks}{flags}")
+    for x in failed:
+        lines.append(f"- ⚠️ 채점 실패: [{cut_title(x['title'])}]({x['url']}) ({x['result'].get('error', '')})")
+    return lines
+
+
+def write_summary(new_items, changed, dry_run, total=None, skipped=None, scored=None):
     """GitHub Actions 실행 요약 작성 (검색 건수 = 신규 + 이미 등록 + 본문 없음 + 수집 실패)"""
     skipped = skipped or {"existing": [], "no_body": [], "error": []}
     lines = [f"## QB 후기 노션 동기화 {'(DRY RUN)' if dry_run else ''}"]
@@ -530,6 +603,10 @@ def write_summary(new_items, changed, dry_run, total=None, skipped=None):
     if changed:
         lines += ["", "### 비공개 전환"]
         lines += [f"- {url}" for url in changed]
+    # 신규 글 채점 + 재채점 결과를 함께 표시
+    new_scored = [{"title": it["title"], "url": it["url"], "id": None, "result": it["score"]}
+                  for it in new_items if it.get("score")]
+    lines += score_summary_lines(new_scored + (scored or []))
     text = "\n".join(lines)
     print("\n" + text)
     path = os.getenv("GITHUB_STEP_SUMMARY")
@@ -543,6 +620,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="노션에 쓰지 않고 결과만 출력")
     parser.add_argument("--skip-recheck", action="store_true", help="기존 행 공개 상태 재점검 생략")
     parser.add_argument("--urls", help="검색 대신 처리할 URL 목록(쉼표 구분)")
+    parser.add_argument("--rescore", choices=["none", "missing", "all"], default="none",
+                        help="기존 공개 블로그 채점: missing=점수 없는 행만, all=전체 재채점('검토 완료' 행 제외)")
+    parser.add_argument("--skip-collect", action="store_true", help="신규 수집을 건너뜀 (재채점만 할 때)")
     args = parser.parse_args()
 
     if not NOTION_TOKEN:
@@ -555,7 +635,9 @@ def main():
     print(f"[INFO] 노션 기존 등록 링크: {len(known)}건")
 
     # 1) 수집 대상 URL 확보
-    if args.urls:
+    if args.skip_collect:
+        urls = []
+    elif args.urls:
         urls = [u.strip() for u in args.urls.split(",") if u.strip()]
     else:
         from scrape_naver_email import scrape_naver_blog
@@ -575,7 +657,15 @@ def main():
     # 3) 기존 행 상태 재점검
     changed = [] if args.skip_recheck else recheck_status(notion, args.dry_run)
 
-    write_summary(new_items, changed, args.dry_run, total=len(urls), skipped=skipped)
+    # 4) 기존 글 품질 채점 (요청 시)
+    scored = []
+    if args.rescore != "none":
+        if not ANTHROPIC_API_KEY:
+            print("[WARN] ANTHROPIC_API_KEY 가 없어 재채점을 건너뜁니다.")
+        else:
+            scored = rescore_existing(notion, args.rescore, args.dry_run)
+
+    write_summary(new_items, changed, args.dry_run, total=len(urls), skipped=skipped, scored=scored)
 
 
 if __name__ == "__main__":

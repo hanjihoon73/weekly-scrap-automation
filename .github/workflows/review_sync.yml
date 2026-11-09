@@ -26,6 +26,23 @@ on:
         description: '(선택) 검색 대신 처리할 블로그 URL, 쉼표로 구분'
         required: false
         default: ''
+      rescore:
+        description: '기존 공개 블로그 품질 채점 (none=안 함, missing=점수 없는 글만, all=전체 재채점·검토 완료 제외)'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - 'none'
+          - 'missing'
+          - 'all'
+      skip_collect:
+        description: '신규 수집 생략 (재채점만 할 때 true)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 # 동기화 작업이 중복 실행되지 않도록 동시 실행 그룹 지정 (메일 워크플로우와는 시간대로 분리)
 concurrency:
@@ -38,7 +55,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60   # 기존 글 일괄 채점 시 건당 수십 초 소요
 
     steps:
       - name: Checkout Code
@@ -71,11 +88,16 @@ jobs:
           IN_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           IN_SKIP_RECHECK: ${{ github.event.inputs.skip_recheck || 'false' }}
           IN_URLS: ${{ github.event.inputs.urls }}
+          IN_RESCORE: ${{ github.event.inputs.rescore || 'none' }}
+          IN_SKIP_COLLECT: ${{ github.event.inputs.skip_collect || 'false' }}
         run: |
           # 예약 실행은 실제 반영, 수동 실행은 입력값에 따름
           ARGS=""
           if [ "$IN_DRY_RUN" == "true" ]; then ARGS="$ARGS --dry-run"; fi
           if [ "$IN_SKIP_RECHECK" == "true" ]; then ARGS="$ARGS --skip-recheck"; fi
+          if [ "$IN_SKIP_COLLECT" == "true" ]; then ARGS="$ARGS --skip-collect"; fi
+          # 선택지 값만 허용 (입력값 검증)
+          case "$IN_RESCORE" in none|missing|all) ARGS="$ARGS --rescore $IN_RESCORE";; esac
           if [ -n "$IN_URLS" ]; then
             python execution/sync_reviews_to_notion.py $ARGS --urls "$IN_URLS"
           else
