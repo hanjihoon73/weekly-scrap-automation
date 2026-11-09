@@ -361,12 +361,16 @@ class Notion:
             payload["start_cursor"] = data["next_cursor"]
 
     def existing_links(self):
-        """이미 등록된 '링크' 집합"""
-        links = set()
+        """이미 등록된 '링크' → {title, id} 사전 (중복 확인 + Summary 표시용)"""
+        links = {}
         for p in self.query():
-            url = p["properties"].get("링크", {}).get("url")
-            if url:
-                links.add(canonical_url(url))
+            props = p["properties"]
+            url = props.get("링크", {}).get("url")
+            if not url:
+                continue
+            title = "".join(t.get("plain_text", "") for t in props.get("제목", {}).get("title", []))
+            uid = (props.get("id", {}).get("unique_id") or {}).get("number")  # DB의 자동 증가 id
+            links[canonical_url(url)] = {"title": title, "id": uid}
         return links
 
     def create(self, properties):
@@ -409,20 +413,24 @@ def build_properties(item):
 # 6. 메인 처리
 # ---------------------------------------------------------------------------
 def collect_new(urls, known_links, dry_run=False):
-    """신규 URL 상세 수집 + 판정 + 태깅"""
+    """신규 URL 상세 수집 + 판정 + 태깅. 반환: (신규 항목 목록, 건너뛴 항목 사전)"""
     session, items = requests.Session(), []
+    skipped = {"existing": [], "no_body": [], "error": []}  # Summary 대조용
     for raw in urls:
         url = canonical_url(raw)
         if url in known_links:
             print(f"[SKIP] 이미 등록됨: {url}")
+            skipped["existing"].append({"url": url, **known_links[url]})
             continue
         try:
             post = fetch_post(url, session)
         except Exception as e:
             print(f"[ERROR] 상세 수집 실패: {url} ({e})")
+            skipped["error"].append({"url": url, "reason": str(e)[:80]})
             continue
         if not post["ok"]:
             print(f"[SKIP] 본문 없음(비공개·삭제 가능성): {url}")
+            skipped["no_body"].append({"url": url})
             continue
         tags = tag_review(post["title"], post["body"])
         item = {"url": url, **post, **tags, "connector": is_connector(post["body"])}
@@ -431,11 +439,11 @@ def collect_new(urls, known_links, dry_run=False):
         elif item.get("error"):
             item["note"] = f"자동 태깅 실패({item['error']}) - 키워드·학년 수동 입력 필요"
         items.append(item)
-        known_links.add(url)
+        known_links[url] = {"title": post["title"], "id": None, "this_run": True}  # 같은 실행 내 중복 방지
         print(f"[NEW] {cut_title(post['title'])} | {post['date']} | {post['nickname']} | "
               f"커넥터즈:{'Yes' if item['connector'] else 'No'} | 키워드:{item['keywords']} | 학년:{item['grades']}")
         time.sleep(REQUEST_DELAY)
-    return items
+    return items, skipped
 
 
 def recheck_status(notion, dry_run=False):
@@ -481,21 +489,47 @@ def recheck_status(notion, dry_run=False):
     return [url for _, url in changed]
 
 
-def write_summary(new_items, changed, dry_run):
-    """GitHub Actions 실행 요약 작성"""
-    lines = [f"## QB 후기 노션 동기화 {'(DRY RUN)' if dry_run else ''}",
-             f"- 신규 등록: {len(new_items)}건", f"- 비공개 전환: {len(changed)}건"]
+def write_summary(new_items, changed, dry_run, total=None, skipped=None):
+    """GitHub Actions 실행 요약 작성 (검색 건수 = 신규 + 이미 등록 + 본문 없음 + 수집 실패)"""
+    skipped = skipped or {"existing": [], "no_body": [], "error": []}
+    lines = [f"## QB 후기 노션 동기화 {'(DRY RUN)' if dry_run else ''}"]
+    if total is not None:
+        lines.append(f"- 검색 수집: {total}건 (메일 스크랩 건수와 대조용)")
+    lines += [f"- 신규 등록: {len(new_items)}건",
+              f"- 이미 등록됨(건너뜀): {len(skipped['existing'])}건"]
+    if skipped["no_body"]:
+        lines.append(f"- 본문 없음(비공개·삭제 추정, 건너뜀): {len(skipped['no_body'])}건")
+    if skipped["error"]:
+        lines.append(f"- ⚠️ 상세 수집 실패(건너뜀): {len(skipped['error'])}건")
+    lines.append(f"- 비공개 전환: {len(changed)}건")
     failed = [it for it in new_items if it.get("error")]
     if failed:
         # 태깅 실패가 있으면 눈에 띄게 경고 (노션 비고에도 사유 기록됨)
         lines.append(f"- ⚠️ 자동 태깅 실패: {len(failed)}건 (노션 비고 확인 후 수동 입력 필요)")
-    lines.append("")
+    if new_items:
+        lines += ["", "### 신규 등록"]
     for it in new_items:
         tag_text = f"⚠️ 태깅 실패({it['error']})" if it.get("error") else (', '.join(it['keywords']) or '키워드 없음')
         lines.append(f"- [{cut_title(it['title'])}]({it['url']}) · 커넥터즈 {'Yes' if it['connector'] else 'No'}"
                      f" · {tag_text}")
-    for url in changed:
-        lines.append(f"- 비공개 전환: {url}")
+    if skipped["existing"]:
+        lines += ["", "### 이미 등록된 글 (노션에 있음)"]
+        for it in skipped["existing"]:
+            label = cut_title(it.get("title") or "") or it["url"]
+            if it.get("this_run"):
+                id_text = "이번 실행에서 등록"
+            else:
+                id_text = f"DB id {it['id']}" if it.get("id") is not None else "DB id 미상"
+            lines.append(f"- [{label}]({it['url']}) · {id_text}")
+    if skipped["no_body"]:
+        lines += ["", "### 본문 없음 (비공개·삭제 추정)"]
+        lines += [f"- {it['url']}" for it in skipped["no_body"]]
+    if skipped["error"]:
+        lines += ["", "### ⚠️ 상세 수집 실패"]
+        lines += [f"- {it['url']} ({it['reason']})" for it in skipped["error"]]
+    if changed:
+        lines += ["", "### 비공개 전환"]
+        lines += [f"- {url}" for url in changed]
     text = "\n".join(lines)
     print("\n" + text)
     path = os.getenv("GITHUB_STEP_SUMMARY")
@@ -530,7 +564,7 @@ def main():
     print(f"[INFO] 검색 수집 URL: {len(urls)}건")
 
     # 2) 신규 상세 수집·태깅 → 노션 등록
-    new_items = collect_new(urls, known, args.dry_run)
+    new_items, skipped = collect_new(urls, known, args.dry_run)
     for it in new_items:
         props = build_properties(it)
         if args.dry_run:
@@ -541,7 +575,7 @@ def main():
     # 3) 기존 행 상태 재점검
     changed = [] if args.skip_recheck else recheck_status(notion, args.dry_run)
 
-    write_summary(new_items, changed, args.dry_run)
+    write_summary(new_items, changed, args.dry_run, total=len(urls), skipped=skipped)
 
 
 if __name__ == "__main__":
